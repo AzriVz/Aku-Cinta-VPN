@@ -5,7 +5,7 @@ if [[ ${EUID} -ne 0 ]]; then
     echo "ERROR: run this script as root (sudo $0)" >&2
     exit 1
 fi
-for command in ip python3 curl sha256sum dd; do
+for command in ip python3 curl sha256sum dd stat; do
     command -v "${command}" >/dev/null 2>&1 || { echo "ERROR: '${command}' is required" >&2; exit 1; }
 done
 
@@ -30,7 +30,9 @@ trap cleanup EXIT INT TERM
 SOURCE_FILE="${SERVER_DIR}/vpn-test-5mb.bin"
 DEST_FILE="${CLIENT_DIR}/vpn-test-5mb.bin"
 dd if=/dev/urandom of="${SOURCE_FILE}" bs=1M count=5 status=none
+SOURCE_SIZE=$(stat -c '%s' "${SOURCE_FILE}")
 SOURCE_HASH=$(sha256sum "${SOURCE_FILE}" | awk '{print $1}')
+echo "Created test file: ${SOURCE_SIZE} bytes (5 MiB)"
 
 ip netns exec vpn-b python3 -m http.server 8080 \
     --bind 10.8.0.2 \
@@ -38,24 +40,38 @@ ip netns exec vpn-b python3 -m http.server 8080 \
     >"${WORK_DIR}/http-server.log" 2>&1 &
 SERVER_PID=$!
 
-downloaded=false
+server_ready=false
 for _attempt in 1 2 3 4 5; do
-    if ip netns exec vpn-a curl --fail --silent --show-error \
-        --connect-timeout 2 --max-time 60 \
-        --output "${DEST_FILE}" \
-        http://10.8.0.2:8080/vpn-test-5mb.bin; then
-        downloaded=true
+    if ip netns exec vpn-b curl --fail --silent --head \
+        --connect-timeout 1 --max-time 2 \
+        http://10.8.0.2:8080/vpn-test-5mb.bin \
+        >/dev/null; then
+        server_ready=true
         break
     fi
     sleep 1
 done
-if [[ ${downloaded} != true ]]; then
+if [[ ${server_ready} != true ]]; then
+    echo "ERROR: HTTP test server did not become ready" >&2
+    cat "${WORK_DIR}/http-server.log" >&2 || true
+    exit 1
+fi
+
+if ! ip netns exec vpn-a curl --fail --silent --show-error \
+    --connect-timeout 2 --max-time 60 \
+    --output "${DEST_FILE}" \
+    http://10.8.0.2:8080/vpn-test-5mb.bin; then
     echo "ERROR: download through 10.8.0.2 failed" >&2
     cat "${WORK_DIR}/http-server.log" >&2 || true
     exit 1
 fi
 
+DEST_SIZE=$(stat -c '%s' "${DEST_FILE}")
 DEST_HASH=$(sha256sum "${DEST_FILE}" | awk '{print $1}')
+if [[ ${SOURCE_SIZE} != "${DEST_SIZE}" ]]; then
+    echo "FAIL: file size mismatch (${SOURCE_SIZE} != ${DEST_SIZE})" >&2
+    exit 1
+fi
 if [[ ${SOURCE_HASH} != "${DEST_HASH}" ]]; then
     echo "FAIL: SHA-256 mismatch" >&2
     echo "source:      ${SOURCE_HASH}" >&2
@@ -63,5 +79,5 @@ if [[ ${SOURCE_HASH} != "${DEST_HASH}" ]]; then
     exit 1
 fi
 
-echo "PASS: 5 MB file transferred successfully through VPN address 10.8.0.2"
+echo "PASS: ${DEST_SIZE} bytes (5 MiB) transferred through VPN address 10.8.0.2"
 echo "PASS: SHA-256 hashes match (${SOURCE_HASH})"

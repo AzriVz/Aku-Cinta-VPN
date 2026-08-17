@@ -46,15 +46,24 @@ func open(name string) (*Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid TUN interface name %q: %w", name, err)
 	}
-	file, err := os.OpenFile(cloneDevice, os.O_RDWR, 0)
+
+	// Register the descriptor with Go's network poller only after TUNSETIFF.
+	// Registering an unattached /dev/net/tun descriptor first can leave a stale
+	// EPOLLERR event on WSL2 and make the first read fail with "not pollable".
+	fd, err := unix.Open(cloneDevice, unix.O_RDWR|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, permissionHint(fmt.Errorf("open %s: %w", cloneDevice, err))
 	}
 
 	request.SetUint16(uint16(unix.IFF_TUN | unix.IFF_NO_PI))
-	if err := unix.IoctlIfreq(int(file.Fd()), unix.TUNSETIFF, request); err != nil {
-		_ = file.Close()
+	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, request); err != nil {
+		_ = unix.Close(fd)
 		return nil, permissionHint(fmt.Errorf("TUNSETIFF for %q: %w", name, err))
+	}
+	file := os.NewFile(uintptr(fd), cloneDevice)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("create Go file for %s", cloneDevice)
 	}
 	return &Device{File: file, name: request.Name()}, nil
 }

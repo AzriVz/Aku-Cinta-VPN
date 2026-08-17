@@ -10,6 +10,24 @@ if ! command -v ip >/dev/null 2>&1; then
     exit 1
 fi
 
+ensure_tun_device() {
+    if [[ -c /dev/net/tun ]]; then
+        return
+    fi
+    if [[ -e /dev/net/tun ]]; then
+        echo "ERROR: /dev/net/tun exists but is not a character device" >&2
+        exit 1
+    fi
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe tun 2>/dev/null || true
+    fi
+    install -d -m 0755 /dev/net
+    mknod -m 0666 /dev/net/tun c 10 200
+    echo "Created /dev/net/tun for this environment"
+}
+
+ensure_tun_device
+
 namespaces=(vpn-a vpn-router vpn-b)
 
 cleanup_old_topology() {
